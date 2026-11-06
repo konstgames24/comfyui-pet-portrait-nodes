@@ -411,6 +411,87 @@ class PetRestoreColors:
         return (out.clamp(0, 1),)
 
 
+class PetMatchColors:
+    """Gives a newly painted animal the coat colours of the photo. The pose differs, so pixel-wise
+    colour restore is impossible; instead the colour statistics (mean and spread of the chroma, and
+    optionally brightness) of the animal are matched to the photo's animal: a ginger-tinted grey cat
+    turns grey again, while the brushwork and markings stay."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "painting": ("IMAGE",),
+            "painting_mask": ("MASK",),
+            "photo": ("IMAGE",),
+            "photo_mask": ("MASK",),
+            "strength": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 1.0, "step": 0.05}),
+            "brightness": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05,
+                                     "tooltip": "How much of the photo's overall brightness and contrast to take as well."}),
+        }}
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "match"
+    CATEGORY = "image/postprocessing"
+
+    def match(self, painting, painting_mask, photo, photo_mask, strength, brightness):
+        m = _TO_YCBCR.to(painting)
+        p = painting[0] @ m.T
+        q = photo[0].to(painting) @ m.T
+        pm = _fit_mask(painting_mask, p.shape[:2]).to(p) > 0.5
+        qm = _fit_mask(photo_mask, q.shape[:2]).to(p) > 0.5
+        if pm.sum() < 16 or qm.sum() < 16:
+            return (painting,)
+        ps, qs = p[pm], q[qm]
+        mean_p, std_p = ps.mean(0), ps.std(0) + 1e-4
+        mean_q, std_q = qs.mean(0), qs.std(0) + 1e-4
+        matched = (p - mean_p) / std_p * std_q + mean_q
+        k = torch.tensor([brightness, 1.0, 1.0]).to(p) * strength
+        out = p + (matched - p) * k
+        a = pm.float()[..., None]
+        out = out * a + p * (1 - a)
+        return ((out @ torch.linalg.inv(m).T).clamp(0, 1)[None],)
+
+
+class PetCropToBox:
+    """Crops the image to a Qwen3-VL box (0-1000 coordinates) with some margin and scales it to a
+    square, e.g. a close-up of the face as an extra reference for the painter."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "image": ("IMAGE",),
+            "box": ("STRING", {"forceInput": True, "tooltip": "Text containing [x1, y1, x2, y2] in 0-1000 coordinates."}),
+            "pad": ("FLOAT", {"default": 0.15, "min": 0.0, "max": 1.0, "step": 0.01}),
+            "size": ("INT", {"default": 768, "min": 64, "max": 2048, "step": 16}),
+        }}
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "crop"
+    CATEGORY = "image/transform"
+
+    def crop(self, image, box, pad, size):
+        h, w = image.shape[1:3]
+        found = re.search(r"\[([^\]]*)\]", box)
+        nums = [float(v) for v in re.findall(r"-?\d+(?:\.\d+)?", found.group(1))[:4]] if found else []
+        if len(nums) == 4 and nums[2] > nums[0] and nums[3] > nums[1]:
+            x0, y0, x1, y1 = nums[0] * w / 1000, nums[1] * h / 1000, nums[2] * w / 1000, nums[3] * h / 1000
+        else:
+            x0, y0, x1, y1 = 0, 0, w, h
+        side = max(x1 - x0, y1 - y0) * (1 + 2 * pad)
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        x0, y0 = int(max(0, cx - side / 2)), int(max(0, cy - side / 2))
+        x1, y1 = int(min(w, cx + side / 2)), int(min(h, cy + side / 2))
+        crop = image[:1, y0:y1, x0:x1].movedim(-1, 1)
+        return (F.interpolate(crop, size=(size, size), mode="bicubic", antialias=True).movedim(1, -1).clamp(0, 1),)
+
+
+def _fit_mask(mask, size):
+    m = mask[:1].float()
+    if m.shape[1:] != tuple(size):
+        m = F.interpolate(m[None], size=size, mode="bilinear")[0]
+    return m[0]
+
+
 # Gradient maps from shadows to highlights. The animal keeps its own brightness (all the brushwork),
 # only the hues are taken from the palette, so the result reads as one colour scheme with the background.
 PALETTES = {
@@ -733,7 +814,8 @@ NODE_CLASS_MAPPINGS = {"PetPortraitLayout": PetPortraitLayout, "PetHeadPortraitL
                        "PetRestoreColors": PetRestoreColors, "PetFlattenBackground": PetFlattenBackground,
                        "PetPastelBackground": PetPastelBackground, "PetPastelPalette": PetPastelPalette,
                        "PetPortraitLayoutPadded": PetPortraitLayoutPadded, "PetColorPalette": PetColorPalette,
-                       "PetSplitAnimals": PetSplitAnimals, "PetFaceMask": PetFaceMask, "PetGroupLayout": PetGroupLayout}
+                       "PetSplitAnimals": PetSplitAnimals, "PetFaceMask": PetFaceMask, "PetGroupLayout": PetGroupLayout,
+                       "PetMatchColors": PetMatchColors, "PetCropToBox": PetCropToBox}
 NODE_DISPLAY_NAME_MAPPINGS = {"PetPortraitLayout": "Pet Portrait Layout", "PetHeadPortraitLayout": "Pet Head Portrait Layout",
                               "PetRestoreColors": "Pet Restore Colors", "PetFlattenBackground": "Pet Flatten Background",
                               "PetPastelBackground": "Pet Pastel Background",
@@ -742,4 +824,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {"PetPortraitLayout": "Pet Portrait Layout", "PetHe
                               "PetColorPalette": "Pet Color Palette (experimental)",
                               "PetSplitAnimals": "Pet Split Animals (experimental)",
                               "PetFaceMask": "Pet Face Mask (experimental)",
-                              "PetGroupLayout": "Pet Group Layout (experimental)"}
+                              "PetGroupLayout": "Pet Group Layout (experimental)",
+                              "PetMatchColors": "Pet Match Colors (experimental)",
+                              "PetCropToBox": "Pet Crop To Box (experimental)"}

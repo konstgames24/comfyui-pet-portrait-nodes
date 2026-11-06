@@ -14,6 +14,8 @@ Install: put this folder into `ComfyUI/custom_nodes/` (or `git clone` the repo t
 | Pet Split Animals | Splits a photo into one crop per animal from Qwen3-VL `bbox_2d` boxes (list output) |
 | Pet Head Portrait Layout | Frames an untouched photo by the animal's head box |
 | Pet Face Mask | Per-pixel strength mask: weaker painterly pass on the face (with Differential Diffusion) |
+| Pet Match Colors | Gives a newly painted animal the coat colours of the photo (colour statistics, pose-independent) |
+| Pet Crop To Box | Crops to a Qwen3-VL box, e.g. a face close-up as an extra reference |
 | Pet Restore Colors | Brushwork from a painting, colours from the photo |
 | Pet Flatten Background | Exact flat background while keeping painted fur wisps at the outline |
 | Pet Color Palette | Gradient-map recolouring of the animal (not used by the workflows) |
